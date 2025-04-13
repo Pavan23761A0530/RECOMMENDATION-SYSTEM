@@ -1,0 +1,472 @@
+# Recommendation System Implementation
+# Using Collaborative Filtering and Matrix Factorization
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse.linalg import svds
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# 1. LOAD AND PREPARE SAMPLE DATA
+# For this example, we'll create a synthetic movie ratings dataset
+# In a real application, you would load your own dataset
+
+def generate_sample_data(num_users=100, num_items=50, sparsity=0.1):
+    """Generate a synthetic user-item rating matrix"""
+    # Initialize a matrix with NaN values
+    ratings_matrix = np.full((num_users, num_items), np.nan)
+    
+    # Calculate how many ratings to generate based on sparsity
+    num_ratings = int(num_users * num_items * sparsity)
+    
+    # Randomly generate ratings
+    for _ in range(num_ratings):
+        user = np.random.randint(0, num_users)
+        item = np.random.randint(0, num_items)
+        # Generate rating between 1 and 5
+        ratings_matrix[user, item] = np.random.randint(1, 6)
+    
+    # Convert to DataFrame for easier handling
+    user_ids = [f'User_{i}' for i in range(num_users)]
+    item_ids = [f'Item_{i}' for i in range(num_items)]
+    df = pd.DataFrame(ratings_matrix, index=user_ids, columns=item_ids)
+    
+    # Convert to long format (user, item, rating)
+    ratings_df = df.stack().reset_index()
+    ratings_df.columns = ['user_id', 'item_id', 'rating']
+    
+    return df, ratings_df
+
+# Generate data
+matrix_df, ratings_df = generate_sample_data(num_users=100, num_items=50, sparsity=0.1)
+
+print(f"Generated dataset with {len(ratings_df)} ratings")
+print(f"Data sparsity: {len(ratings_df) / (matrix_df.shape[0] * matrix_df.shape[1]):.2%}")
+
+# Display the first few rows of the ratings data
+print("\nSample of ratings data:")
+print(ratings_df.head())
+
+# 2. EXPLORATORY DATA ANALYSIS
+
+# Plot rating distribution
+plt.figure(figsize=(8, 5))
+sns.countplot(x='rating', data=ratings_df)
+plt.title('Distribution of Ratings')
+plt.xlabel('Rating')
+plt.ylabel('Count')
+plt.show()
+
+# Calculate and plot user activity
+user_activity = ratings_df.groupby('user_id')['rating'].count().sort_values(ascending=False)
+plt.figure(figsize=(10, 5))
+user_activity.head(20).plot(kind='bar')
+plt.title('Number of Ratings per User (Top 20)')
+plt.xlabel('User')
+plt.ylabel('Number of Ratings')
+plt.tight_layout()
+plt.show()
+
+# Calculate and plot item popularity
+item_popularity = ratings_df.groupby('item_id')['rating'].count().sort_values(ascending=False)
+plt.figure(figsize=(10, 5))
+item_popularity.head(20).plot(kind='bar')
+plt.title('Number of Ratings per Item (Top 20)')
+plt.xlabel('Item')
+plt.ylabel('Number of Ratings')
+plt.tight_layout()
+plt.show()
+
+# 3. PREPARE DATA FOR MODELING
+
+# Convert user_id and item_id to numeric indices
+user_mapping = {user: i for i, user in enumerate(ratings_df['user_id'].unique())}
+item_mapping = {item: i for i, item in enumerate(ratings_df['item_id'].unique())}
+
+ratings_df['user_idx'] = ratings_df['user_id'].map(user_mapping)
+ratings_df['item_idx'] = ratings_df['item_id'].map(item_mapping)
+
+# Split data into train and test sets
+train_data, test_data = train_test_split(ratings_df, test_size=0.2, random_state=42)
+
+print(f"\nTraining data size: {len(train_data)}")
+print(f"Test data size: {len(test_data)}")
+
+# Create a user-item rating matrix for training
+n_users = len(user_mapping)
+n_items = len(item_mapping)
+train_matrix = np.zeros((n_users, n_items))
+
+for _, row in train_data.iterrows():
+    train_matrix[int(row['user_idx']), int(row['item_idx'])] = row['rating']
+
+# 4. IMPLEMENT COLLABORATIVE FILTERING APPROACHES
+
+# 4.1 User-Based Collaborative Filtering
+def user_based_cf(train_matrix, user_id, item_id, k=10):
+    """
+    Implement user-based collaborative filtering
+    
+    Args:
+        train_matrix: User-item rating matrix
+        user_id: Target user index
+        item_id: Target item index
+        k: Number of nearest neighbors
+        
+    Returns:
+        Predicted rating
+    """
+    # Calculate user similarity matrix using cosine similarity
+    user_similarity = cosine_similarity(train_matrix)
+    
+    # Get similarities of target user with all other users
+    sim_scores = user_similarity[user_id]
+    
+    # Get users who have rated the target item
+    item_ratings = train_matrix[:, item_id]
+    rated_indices = np.where(item_ratings > 0)[0]
+    
+    # If no user has rated this item, return the average rating of the user
+    if len(rated_indices) == 0:
+        user_ratings = train_matrix[user_id]
+        user_avg = np.mean(user_ratings[user_ratings > 0]) if np.sum(user_ratings > 0) > 0 else 0
+        return user_avg
+    
+    # Get similarities and ratings of users who rated the item
+    sim_with_item = sim_scores[rated_indices]
+    ratings_for_item = item_ratings[rated_indices]
+    
+    # Sort by similarity
+    sorted_indices = np.argsort(sim_with_item)[::-1]
+    sim_with_item = sim_with_item[sorted_indices]
+    ratings_for_item = ratings_for_item[sorted_indices]
+    
+    # Use only top k neighbors
+    if len(sim_with_item) > k:
+        sim_with_item = sim_with_item[:k]
+        ratings_for_item = ratings_for_item[:k]
+    
+    # Predict rating
+    if np.sum(sim_with_item) > 0:
+        predicted_rating = np.sum(sim_with_item * ratings_for_item) / np.sum(sim_with_item)
+    else:
+        # If all similarities are 0, use the average rating
+        predicted_rating = np.mean(ratings_for_item) if len(ratings_for_item) > 0 else 0
+    
+    return predicted_rating
+
+# 4.2 Item-Based Collaborative Filtering
+def item_based_cf(train_matrix, user_id, item_id, k=10):
+    """
+    Implement item-based collaborative filtering
+    
+    Args:
+        train_matrix: User-item rating matrix
+        user_id: Target user index
+        item_id: Target item index
+        k: Number of nearest neighbors
+        
+    Returns:
+        Predicted rating
+    """
+    # Calculate item similarity matrix using cosine similarity
+    item_similarity = cosine_similarity(train_matrix.T)
+    
+    # Get similarities of target item with all other items
+    sim_scores = item_similarity[item_id]
+    
+    # Get items rated by the user
+    user_ratings = train_matrix[user_id]
+    rated_indices = np.where(user_ratings > 0)[0]
+    
+    # If user hasn't rated any items, return the average rating of the item
+    if len(rated_indices) == 0:
+        item_ratings = train_matrix[:, item_id]
+        item_avg = np.mean(item_ratings[item_ratings > 0]) if np.sum(item_ratings > 0) > 0 else 0
+        return item_avg
+    
+    # Get similarities and ratings of items rated by the user
+    sim_with_rated = sim_scores[rated_indices]
+    user_item_ratings = user_ratings[rated_indices]
+    
+    # Sort by similarity
+    sorted_indices = np.argsort(sim_with_rated)[::-1]
+    sim_with_rated = sim_with_rated[sorted_indices]
+    user_item_ratings = user_item_ratings[sorted_indices]
+    
+    # Use only top k neighbors
+    if len(sim_with_rated) > k:
+        sim_with_rated = sim_with_rated[:k]
+        user_item_ratings = user_item_ratings[:k]
+    
+    # Predict rating
+    if np.sum(sim_with_rated) > 0:
+        predicted_rating = np.sum(sim_with_rated * user_item_ratings) / np.sum(sim_with_rated)
+    else:
+        # If all similarities are 0, use the average rating
+        predicted_rating = np.mean(user_item_ratings) if len(user_item_ratings) > 0 else 0
+    
+    return predicted_rating
+
+# 4.3 Matrix Factorization (SVD)
+def matrix_factorization_svd(train_matrix, k=20):
+    """
+    Implement matrix factorization using SVD
+    
+    Args:
+        train_matrix: User-item rating matrix
+        k: Number of latent factors
+        
+    Returns:
+        Reconstructed rating matrix
+    """
+    # Fill missing values with zeros
+    filled_matrix = np.nan_to_num(train_matrix)
+    
+    # Calculate user and item means
+    user_means = np.true_divide(filled_matrix.sum(1), (filled_matrix != 0).sum(1))
+    user_means = np.nan_to_num(user_means)
+    
+    # Subtract mean ratings
+    normalized_matrix = filled_matrix - np.outer(user_means, np.ones(filled_matrix.shape[1]))
+    
+    # Compute SVD
+    U, sigma, Vt = svds(normalized_matrix, k=k)
+    
+    # Convert sigma to diagonal matrix
+    sigma_diag = np.diag(sigma)
+    
+    # Reconstruct the matrix
+    reconstructed_matrix = np.dot(np.dot(U, sigma_diag), Vt) + np.outer(user_means, np.ones(train_matrix.shape[1]))
+    
+    # Clip predictions to be between 1 and 5
+    reconstructed_matrix = np.clip(reconstructed_matrix, 1, 5)
+    
+    return reconstructed_matrix
+
+# 5. EVALUATE MODELS
+
+# Function to evaluate models
+def evaluate_model(model_name, predictions, actual):
+    """Evaluate a model using RMSE and MAE"""
+    mask = ~np.isnan(actual)
+    rmse = np.sqrt(mean_squared_error(actual[mask], predictions[mask]))
+    mae = np.mean(np.abs(actual[mask] - predictions[mask]))
+    
+    print(f"\n{model_name} Evaluation:")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"MAE: {mae:.4f}")
+    
+    return rmse, mae
+
+# Create test matrix with actual ratings
+test_matrix = np.zeros((n_users, n_items))
+test_matrix.fill(np.nan)
+
+for _, row in test_data.iterrows():
+    user_idx = int(row['user_idx'])
+    item_idx = int(row['item_idx'])
+    test_matrix[user_idx, item_idx] = row['rating']
+
+# 5.1 Evaluate User-Based CF
+user_cf_predictions = np.zeros_like(test_matrix)
+user_cf_predictions.fill(np.nan)
+
+# Only predict for test data points to save computation
+for _, row in test_data.iterrows():
+    user_idx = int(row['user_idx'])
+    item_idx = int(row['item_idx'])
+    user_cf_predictions[user_idx, item_idx] = user_based_cf(train_matrix, user_idx, item_idx)
+
+user_cf_rmse, user_cf_mae = evaluate_model("User-Based Collaborative Filtering", user_cf_predictions, test_matrix)
+
+# 5.2 Evaluate Item-Based CF
+item_cf_predictions = np.zeros_like(test_matrix)
+item_cf_predictions.fill(np.nan)
+
+# Only predict for test data points to save computation
+for _, row in test_data.iterrows():
+    user_idx = int(row['user_idx'])
+    item_idx = int(row['item_idx'])
+    item_cf_predictions[user_idx, item_idx] = item_based_cf(train_matrix, user_idx, item_idx)
+
+item_cf_rmse, item_cf_mae = evaluate_model("Item-Based Collaborative Filtering", item_cf_predictions, test_matrix)
+
+# 5.3 Evaluate Matrix Factorization
+# Perform matrix factorization on the training data
+mf_full_predictions = matrix_factorization_svd(train_matrix)
+
+# Extract predictions for test data points
+mf_predictions = np.zeros_like(test_matrix)
+mf_predictions.fill(np.nan)
+
+for _, row in test_data.iterrows():
+    user_idx = int(row['user_idx'])
+    item_idx = int(row['item_idx'])
+    mf_predictions[user_idx, item_idx] = mf_full_predictions[user_idx, item_idx]
+
+mf_rmse, mf_mae = evaluate_model("Matrix Factorization (SVD)", mf_predictions, test_matrix)
+
+# 6. COMPARE MODELS
+
+# Collect evaluation metrics
+models = ['User-Based CF', 'Item-Based CF', 'Matrix Factorization']
+rmse_values = [user_cf_rmse, item_cf_rmse, mf_rmse]
+mae_values = [user_cf_mae, item_cf_mae, mf_mae]
+
+# Plot comparison
+fig, ax = plt.subplots(figsize=(12, 6))
+x = np.arange(len(models))
+width = 0.35
+
+rects1 = ax.bar(x - width/2, rmse_values, width, label='RMSE')
+rects2 = ax.bar(x + width/2, mae_values, width, label='MAE')
+
+ax.set_title('Model Comparison')
+ax.set_xticks(x)
+ax.set_xticklabels(models)
+ax.legend()
+
+ax.bar_label(rects1, fmt='%.3f')
+ax.bar_label(rects2, fmt='%.3f')
+
+plt.tight_layout()
+plt.show()
+
+# 7. GENERATE RECOMMENDATIONS FOR A SAMPLE USER
+
+def get_top_n_recommendations(user_id, predictions, n=10, exclude_rated=True):
+    """
+    Get top N recommendations for a user
+    
+    Args:
+        user_id: User index
+        predictions: Predicted ratings matrix
+        n: Number of recommendations
+        exclude_rated: Whether to exclude already rated items
+        
+    Returns:
+        List of (item_id, predicted_rating) tuples
+    """
+    user_ratings = train_matrix[user_id]
+    user_predictions = predictions[user_id]
+    
+    if exclude_rated:
+        # Set predictions for already rated items to NaN
+        user_predictions[user_ratings > 0] = np.nan
+    
+    # Get indices of top n predictions
+    top_indices = np.argsort(user_predictions)[::-1][:n]
+    
+    # Convert to original item IDs and include predicted ratings
+    rev_item_mapping = {v: k for k, v in item_mapping.items()}
+    recommendations = [(rev_item_mapping[idx], user_predictions[idx]) for idx in top_indices]
+    
+    return recommendations
+
+# Sample user
+sample_user_idx = 0
+sample_user_id = list(user_mapping.keys())[sample_user_idx]
+
+print(f"\nTop 10 Recommendations for {sample_user_id}:")
+
+# Get recommendations from each model
+user_cf_recs = get_top_n_recommendations(sample_user_idx, user_cf_predictions.copy(), n=10)
+item_cf_recs = get_top_n_recommendations(sample_user_idx, item_cf_predictions.copy(), n=10)
+mf_recs = get_top_n_recommendations(sample_user_idx, mf_full_predictions, n=10)
+
+# Display recommendations
+print("\nUser-Based CF Recommendations:")
+for item, rating in user_cf_recs:
+    if not np.isnan(rating):
+        print(f"{item}: {rating:.2f}")
+
+print("\nItem-Based CF Recommendations:")
+for item, rating in item_cf_recs:
+    if not np.isnan(rating):
+        print(f"{item}: {rating:.2f}")
+
+print("\nMatrix Factorization Recommendations:")
+for item, rating in mf_recs:
+    print(f"{item}: {rating:.2f}")
+
+# 8. VISUALIZATION OF RECOMMENDATIONS
+
+# Convert matrices to DataFrames for better visualization
+def create_heatmap(matrix, title):
+    """Create a heatmap of the matrix"""
+    plt.figure(figsize=(10, 8))
+    ax = sns.heatmap(matrix[:20, :20], cmap="YlGnBu", annot=False)
+    plt.title(title)
+    plt.xlabel('Items')
+    plt.ylabel('Users')
+    plt.tight_layout()
+    plt.show()
+
+# Visualize original training data
+create_heatmap(train_matrix, "Original Rating Matrix (Subset)")
+
+# Visualize matrix factorization predictions
+create_heatmap(mf_full_predictions, "Matrix Factorization Predictions (Subset)")
+
+# 9. SUMMARY AND CONCLUSION
+
+print("\n=== RECOMMENDATION SYSTEM SUMMARY ===")
+print(f"Dataset: {len(ratings_df)} ratings from {n_users} users on {n_items} items")
+print(f"Data sparsity: {len(ratings_df) / (n_users * n_items):.2%}")
+print("\nModel Performance (Lower is better):")
+print(f"User-Based CF: RMSE = {user_cf_rmse:.4f}, MAE = {user_cf_mae:.4f}")
+print(f"Item-Based CF: RMSE = {item_cf_rmse:.4f}, MAE = {item_cf_mae:.4f}")
+print(f"Matrix Factorization: RMSE = {mf_rmse:.4f}, MAE = {mf_mae:.4f}")
+print("\nBest Performing Model: " + models[np.argmin(rmse_values)])
+print("\nNext Steps for Improvement:")
+print("1. Tune hyperparameters (number of factors, neighborhood size)")
+print("2. Implement hybrid models combining different approaches")
+print("3. Add content-based features for cold-start problems")
+print("4. Explore deep learning approaches for recommendation")
+
+# Example of how to use this system in production
+def recommend_items_for_user(user_id, model='mf', n=10):
+    """
+    Function to generate recommendations for a given user
+    
+    Args:
+        user_id: Original user ID
+        model: Model to use ('user_cf', 'item_cf', or 'mf')
+        n: Number of recommendations
+        
+    Returns:
+        List of recommended item IDs
+    """
+    if user_id not in user_mapping:
+        print(f"User {user_id} not found in the dataset")
+        return []
+    
+    user_idx = user_mapping[user_id]
+    
+    if model == 'user_cf':
+        predictions = np.zeros((n_users, n_items))
+        for item_idx in range(n_items):
+            predictions[user_idx, item_idx] = user_based_cf(train_matrix, user_idx, item_idx)
+        recs = get_top_n_recommendations(user_idx, predictions, n=n)
+    elif model == 'item_cf':
+        predictions = np.zeros((n_users, n_items))
+        for item_idx in range(n_items):
+            predictions[user_idx, item_idx] = item_based_cf(train_matrix, user_idx, item_idx)
+        recs = get_top_n_recommendations(user_idx, predictions, n=n)
+    else:  # default to matrix factorization
+        recs = get_top_n_recommendations(user_idx, mf_full_predictions, n=n)
+    
+    return [item_id for item_id, _ in recs]
+
+# Example usage
+example_user = list(user_mapping.keys())[5]  # Just an example user
+print(f"\nExample production recommendation for {example_user}:")
+recommended_items = recommend_items_for_user(example_user, model='mf', n=5)
+print(recommended_items)
